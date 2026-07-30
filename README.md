@@ -7,7 +7,10 @@ A step-by-step, annotated walkthrough of the integrated population model (IPM) b
 > pathogenic avian influenza panzootic. *Journal of Applied Ecology*, 63, e70234.
 > [doi.org/10.1111/1365-2664.70234](https://doi.org/10.1111/1365-2664.70234)
 
-The paper shows how to evaluate the past and future demographic impact of highly pathogenic avian influenza in long-lived species. This repo builds the Bayesian model to evaluate,
+The paper asks a simple-sounding question with a genuinely hard answer: when a highly
+pathogenic avian influenza outbreak hits a wild bird population, how do you tell whether
+it actually threatens the population's long-term viability, rather than just producing a
+grim headline count of dead birds? This repo builds the Bayesian model that answers that,
 piece by piece — data, model structure, MCMC fitting, and the resilience analysis that
 turns "the population crashed" into "here's how long recovery will take, and how far
 short of its old size it may permanently fall."
@@ -21,7 +24,7 @@ short of its old size it may permanently fall."
 | `run_full_model.R` | Standalone script to reproduce the paper's exact MCMC run (HPAI scenario). ~6-7 hours. |
 | `run_nohpai_model.R` | Companion script for the pre-outbreak (counterfactual) scenario, needed for the resilience comparison. |
 
-**Want to just read it without downloading anything?** [View the rendered tutorial via htmlpreview](https://htmlpreview.github.io/?https://github.com/jaumebadiaboher/hpai-demographic-impact/blob/main/hpai_tutorial.html).
+**Want to just read it without downloading anything?** [View the rendered tutorial](https://jaumebadiaboher.github.io/hpai-demography/hpai_tutorial.html) (served via GitHub Pages).
 
 ## Reproducing it yourself
 

@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: "If you use this code or data, please cite the paper below. If you specifically reuse the code/data files, please also cite the Zenodo archive."
+type: software
+title: "Code and data for: Evaluating the demographic impacts of the highly pathogenic avian influenza panzootic"
+authors:
+  - family-names: Badia-Boher
+    given-names: "Jaume A."
+    orcid: "https://orcid.org/0000-0003-2162-6355"
+  - family-names: Schaub
+    given-names: Michael
+    orcid: "https://orcid.org/0000-0003-2745-0557"
+  - family-names: Mollet
+    given-names: Martin
+  - family-names: "van Geneijgen"
+    given-names: Peter
+  - family-names: "van der Jeugd"
+    given-names: "Henk P."
+  - family-names: Caliendo
+    given-names: Valentina
+  - family-names: Kéry
+    given-names: Marc
+license: CC-BY-4.0
+repository-code: "https://github.com/jaumebadiaboher/hpai-demographic-impact"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.17571734
+    description: "Zenodo archive of the original data and code"
+preferred-citation:
+  type: article
+  title: "Evaluating the demographic impacts of the highly pathogenic avian influenza panzootic"
+  authors:
+    - family-names: Badia-Boher
+      given-names: "Jaume A."
+    - family-names: Schaub
+      given-names: Michael
+    - family-names: Mollet
+      given-names: Martin
+    - family-names: "van Geneijgen"
+      given-names: Peter
+    - family-names: "van der Jeugd"
+      given-names: "Henk P."
+    - family-names: Caliendo
+      given-names: Valentina
+    - family-names: Kéry
+      given-names: Marc
+  journal: "Journal of Applied Ecology"
+  volume: 63
+  issue: 1
+  article-number: e70234
+  year: 2026
+  doi: "10.1111/1365-2664.70234"

@@ -1,0 +1,853 @@
+---
+title: "Bird Flu and the Peregrine Falcon"
+subtitle: "Building a Bayesian integrated population model, from raw data to a conservation diagnosis"
+author: "Jaume A. Badia-Boher"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: show
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+---
+
+## Why this tutorial exists
+
+This guide walks through the analyses behind [*Evaluating the demographic impacts of the highly pathogenic avian influenza panzootic*](https://doi.org/10.1111/1365-2664.70234) (Badia-Boher et al., *Journal of Applied Ecology*, 2026), step by step, with live code.
+
+The goal is to show how an integrated population model (IPM) combined with future projections like this one actually gets built: what the data look like, how the pieces of an integrated model fit together, how the model is run, and how to read the output once it has converged. If you're building a similar model for your own long-lived species, hopefully this saves you some of the trial and error.
+
+Data and code are archived openly on Zenodo ([doi: 10.5281/zenodo.17571734](https://doi.org/10.5281/zenodo.17571734)) under a CC-BY 4.0 license. This document fetches them live from that archive, so that you can directly work with the same data the article uses.
+
+## The question
+
+Since 2021, a highly pathogenic avian influenza virus (HPAIV-H5N1) has caused one of the most severe wildlife disease events on record, with confirmed outbreaks in hundreds of bird and mammal species worldwide. Most of what we know about its impact comes from counts of dead animals. Such counts, however, are a poor indicator of the impact of the disease on an animal population. Most deaths remain for sure undetected. The use of mark-recapture methods in combination with a model of population dynamics (for instance, in an IPM) can account for this partial detectability, estimate survival probabilities for different population stages, and propagate impacts in survival (and in productivity) into impacts on population size over time.
+
+IPMs typically combine three different data types: mark-recapture (often with dead recoveries), breeding pair counts, and productivity surveys. All three data streams are connected through a joint likelihood. This also has the effect of allowing increased precision in the demographic parameter estimates, and even lets us estimate parameters we don't have explicit data for (e.g., immigration or recruitment probabilities).
+
+IPMs are also a great tool to perform population projections. The aim of this approach is to forecast the fate of the population into the future (e.g., for the next 10, 20, 50 years) under a range of scenarios of interest. The use of IPMs allows a correct error propagation from retrospective to future population dynamics. Besides, it eases the calculation of metrics of population resilience -- a *fancy* topic in ecological studies nowadays, and one we unpack properly (what it means, how to measure it) later in this document, in the **Resilience** section.
+
+We used the Dutch peregrine falcon (*Falco peregrinus*) population as a case study: a long-lived raptor with a long monitoring history, intensively exposed to HPAIV through its diet of wild seabirds. The study had multiple aims:
+
+- To describe population dynamics and demographic parameters in the last three decades (1993-2024).
+
+- To assess whether there was a population impact of HPAIV since the first outbreaks (2020-2024), and through which demographic pathway it occurred (stage-specific survival, productivity).
+
+- To evaluate components of population resilience via population projections: how much was the population affected by HPAIV, and how quickly it is predicted to recover.
+
+We fit the model in the Bayesian hierarchical software JAGS via jagsUI, but could also do this in Nimble.
+
+## Getting the data
+
+The archive contains two parallel datasets: one covering 1993–2024 (including the HPAIV years), and one restricted to 1993–2020 (pre-outbreak only, used for the "what if HPAIV hadn't happened" comparison in the paper, necessary to calculate population resilience). This tutorial focuses on the first.
+
+One thing to flag before going any further: **the three data streams don't share the same time span.** Mark-recapture-recovery (`ypool`) goes all the way back to 1993, but breeding pair counts (`cens`) and productivity surveys (`prod`) only start in 2010 -- monitoring effort for those two ramped up considerably later than the ringing scheme did. That's not a problem for the model (it's completely normal for IPMs to have data streams of different lengths -- each parameter just gets estimated from whichever years actually have data for it), but it does mean two different "year 1"s are floating around the code: 1993 for anything indexed off the CMR data, 2010 for anything indexed off the counts or productivity. Keep that in the back of your mind -- it's the reason for a slightly confusing index shift later on.
+
+```{r download-data}
+#| eval: false
+# Fetch the data + code archive directly from Zenodo. If the data are already downloaded, no need to do this again (check).
+if (!file.exists("data_hpai.RData")) {
+  if (!requireNamespace("zen4R", quietly = TRUE)) install.packages("zen4R")
+  library(zen4R)
+  download_zenodo(
+    doi = "10.5281/zenodo.17571734",
+    path = ".",
+    files = list("data_hpai.RData")
+  )
+}
+
+# Optional, but recommended: the archive also contains the actual published
+# posterior samples (pva_hpai.RData, pva_nohpai.RData) -- these ARE the
+# published results, not a re-run of them. Fetching them directly means the
+# Results section below can show publication-quality plots without you
+# needing to run any MCMC yourself. They're larger (~25 MB each), so this
+# is opt-in rather than automatic.
+if (!file.exists("pva_hpai.RData")) {
+  library(zen4R)
+  download_zenodo(
+    doi = "10.5281/zenodo.17571734",
+    path = ".",
+    files = list("pva_hpai.RData", "pva_nohpai.RData")
+  )
+}
+```
+
+```{r load-data}
+load("data_hpai.RData")
+str(data_hpai, max.level = 1)
+```
+
+Three things are bundled in here, matching the three data sources:
+
+- **`ypool`** — the mark-recapture-recovery matrix ready to be analyzed in the marginalized likelihood. Careful here because this is different than what most users work with. In most mark-recapture datasets, each row displays the capture history of a single individual. Here, to speed up computation we used the marginalized likelihood, in which we can just merge all capture histories that show the same combinations of codes into one, and then multiply their likelihood by the number of individuals that share them. Hence, the different rows correspond to every unique capture history in the dataset (`r nrow(data_hpai$ypool)`). Each column belongs to a year (1993–2024). The codes refer to each of the six observation states:
+  - 1 (seen as a nonbreeder with a color ring)
+  - 2 (seen as a nonbreeder with a metal ring only -- this only happens at an individual's very first capture, before it's fitted with a color ring; a metal-ring-only bird can't be positively resighted alive afterward, since the code can't be read from a distance)
+  - 3 (seen as a breeder with a color ring)
+  - 4 (seen as a breeder with a metal ring only -- same caveat as code 2)
+  - 5 (recovered dead)
+  - 6 (not seen)
+- **`prod`** — productivity data: fledgling counts (`nfled`) against the number of monitored pairs (`nmonitored`) per year, 2010–2024.
+- **`cens`** — the yearly breeding pair counts used to anchor the population size estimates.
+
+```{r peek-prod}
+head(data_hpai$prod)
+```
+
+## Building the model
+
+An IPM is really three sub-models stitched together, each one informed by a different data source, all sharing the same underlying demographic parameters. Here's how each piece is built.
+
+### The population's life cycle
+
+We tracked nine stages: locally-born 1-year-olds, then — because peregrines can start breeding anywhere between age 2 and 4 — a branching set of "first-time breeder" vs. "nonbreeder" stages at ages 2, 3, and 4, collapsing into a single "experienced breeder" stage from then on, plus a stage for immigrants recruiting from outside the study population.
+
+| Stage | Meaning                                             |
+|-------|-----------------------------------------------------|
+| N1    | 1-year-old nonbreeders (juveniles)                  |
+| N2    | 2-year-old first-time breeders                      |
+| N3    | 2-year-old nonbreeders                              |
+| N4    | 3-year-old first-time breeders                      |
+| N5    | 3-year-old nonbreeders                              |
+| N6    | 4-year-old first-time breeders                      |
+| N7    | 4-year-old nonbreeders                              |
+| N8    | Experienced breeders (age 5+, or recruited earlier) |
+| N9    | Immigrant first-time breeders                       |
+
+Three survival classes apply across these stages — juvenile (age 1), subadult (age 2), and adult (age 3+) — reflecting the peregrine life history: survival typically rises sharply after the first, riskiest year, then again after the second.
+
+Note that *N9* is the immigrant fraction of the population. Even though we do not have explicit information about immigration, we estimate this as a *hidden parameter* using the indirect information provided by the combination of the three data sources we're using.
+
+### Productivity submodel
+
+The simplest piece: fledgling counts as a Poisson function of the number of monitored pairs and an annual productivity rate, with that rate given a random-effects structure so it can vary year to year.
+
+``` r
+for (t in 1:yearspd) {
+  J[t] ~ dpois(B[t] * rho[t])         # fledglings = pairs monitored x productivity rate
+  log.rho[t] ~ dnorm(l.mean.rho, tau.rho)
+  rho[t] <- exp(log.rho[t])
+}
+```
+
+### Survival & recruitment submodel
+
+This is the most involved piece, and it's a multistate capture-mark-recapture (CMR) model under the hood. Multistate models allow for the estimation of additional parameters of biological interest from ringing data, not only survival. Here, we estimate survival *s* plus the probability of recruitment into the local breeding population, *gam*. In raptors, recruitment refers to the probability that an individual acquires (in this case permanently) a breeding territory, which often also means it starts reproducing. Note that we model both survival and recruitment with an age structure, defined by the matrices *age* and *agerec* respectively.
+
+State-transition probabilities (`psi`) describe how a bird moves between states from one year to the next — survive and stay a nonbreeder, survive and recruit into breeding, or die. Observation probabilities (`po`) describe what we actually see, given the true state — a live resighting, a dead recovery, or nothing at all.
+
+``` r
+psi[1,1,i,t] <- s[age[i,t],t] * (1 - gam[agerec[i,t]])  # survive, stay nonbreeder
+psi[1,3,i,t] <- s[age[i,t],t] * gam[agerec[i,t]]        # survive, recruit as breeder
+psi[1,5,i,t] <- 1 - s[age[i,t],t]                        # die
+```
+
+Rather than the "standard" state-space formulation, we used a **marginalized likelihood** (following Yackulic et al. 2020) — mathematically equivalent, but considerably faster to fit, because it avoids sampling each bird's unobserved true state at every MCMC iteration. This is why the likelihood of the model may look unfamiliar to you compared to other far more popular equivalent likelihoods (e.g., the state-space and the multinomial likelihood). However, this likelihood is also very convenient and computationally efficient.
+
+``` r
+for (i in 1:nind){
+  # First encounter
+  zeta[i,f[i],1] <- equals(1,y[i,f[i]])
+  zeta[i,f[i],2] <- equals(2,y[i,f[i]])
+  zeta[i,f[i],3] <- equals(3,y[i,f[i]])
+  zeta[i,f[i],4] <- equals(4,y[i,f[i]])
+  zeta[i,f[i],5] <- 0
+  zeta[i,f[i],6] <- 0
+  
+  # After first encounter
+  for (t in f[i]:(nyears-1)){
+    zeta[i,t+1,1] <- (zeta[i,t,1:6] %*% psi[,1,i,t]) * po[1,y[i,t+1],i,t]
+    zeta[i,t+1,2] <- (zeta[i,t,1:6] %*% psi[,2,i,t]) * po[2,y[i,t+1],i,t]
+    zeta[i,t+1,3] <- (zeta[i,t,1:6] %*% psi[,3,i,t]) * po[3,y[i,t+1],i,t]
+    zeta[i,t+1,4] <- (zeta[i,t,1:6] %*% psi[,4,i,t]) * po[4,y[i,t+1],i,t]
+    zeta[i,t+1,5] <- (zeta[i,t,1:6] %*% psi[,5,i,t]) * po[5,y[i,t+1],i,t]
+    zeta[i,t+1,6] <- (zeta[i,t,1:6] %*% psi[,6,i,t]) * po[6,y[i,t+1],i,t]
+  } #t
+  
+  lik[i] <- sum(zeta[i,nyears,])
+  fr[i] ~ dbin(lik[i], FR[i])        
+  }
+```
+
+### Population dynamics submodel
+
+This is where the other two pieces meet for describing population dynamics: each stage's size next year is a (stochastic) function of this year's size, survival, and recruitment — literally the same `s` and `gam` parameters the CMR submodel is estimating.
+
+#### Population projections
+
+A conventional IPM stops at the last year with data (2024). Population projections, however, are all about predicting future population size. We do so in the model, and this is why the population dynamics submodel loops run over two combined spans: `yearspd + yearsproj`.
+
+- `yearspd` covers 2010 to 2024 (15 years, matching the observed data)
+- `yearsproj` extends the model from 2025 to 2034 (10 more years, with no data behind them at all)
+
+We've been calling this "population projections," but it's the same concept most people in the field know as **Population Viability Analysis (PVA)**.
+
+Of course, when projecting a model into the future, we don't have data from the future. Here's the trick that makes modelling those years possible anyway: survival, productivity, and immigration are all modeled as *random effects* — each year's value is drawn from a shared distribution (`rho[t] ~ dnorm(l.mean.rho, tau.rho)`, and equivalently for `s` and `omega`) rather than estimated as independent fixed parameters. That shared distribution is fully informed by the real data. So for the projected years, where no data exist at all, we simply keep drawing values from that same shared distribution, which carries the implicit assumption that demographic rates going forward behave statistically like they did in the recent past. This also means uncertainty propagates naturally from the historical fit into the projections — something that was a real source of difficulty before IPMs, but falls out for free here. (You could, of course, modify the projection to test explicit what-if scenarios -- "what if survival drops by 5%?" -- but we don't do that here.)
+
+#### Bonus track: why `s[1, t+17]` and not `s[1, t]`?
+
+This one honestly looks like a bug the first time you see it, and it isn't — it's the "two different year 1s" problem flagged back in **Getting the data** finally showing up in the model code, as an index mismatch between two time axes that happen to share the same underlying `s` array.
+
+::: {.callout-note title="Two clocks, one array"}
+The survival array `s[a, t]` is indexed on the **CMR clock**: column 1 = 1993 (where the ringing data start), so `s[a, 18]` is the survival transition starting in 2010.
+
+The population dynamics loop runs on its own, separate **PVA clock**: `t = 1` is 2010 (where the productivity and count data start), because that's the year `NB[t]` first has data to anchor it.
+
+Both loops share the same `s[a, t]` parameters — survival doesn't care which loop is asking for it — but they disagree about what year `t = 1` means. `2010 - 1993 = 17`, so adding 17 to the PVA clock's `t` converts it into the CMR clock's index.
+:::
+
+``` r
+N[1,t+1] ~ dpois(rho[t]/2 * s[1,t+17] * NB[t])              # new juveniles
+N[2,t+1] ~ dbin(s[2,t+17] * gam[2], N[1,t])                  # 2yo recruiting as breeders
+N[8,t+1] ~ dbin(s[3,t+17], N[2,t]+N[4,t]+N[6,t]+N[7,t]+N[8,t]+N[9,t])  # experienced breeders
+```
+
+The breeding pair counts (`counts`) are then linked to the model's latent number of breeders (`NB`) via a Poisson observation model. This allows the information available in the counts to kick into the whole model and considerably reduce uncertainty.
+
+``` r
+for(t in 1:yearspd){
+  counts[t] ~ dpois(NB[t])
+}
+```
+
+### Assembling the full model
+
+All three pieces above are really one JAGS model — here's the whole thing, written out and saved to disk the way JAGS expects:
+
+```{r build-data}
+require(jagsUI)
+
+# Equivalent to IPMbook::dUnif() (Schaub & Kéry 2022, sec. 5.4.4)
+dUnif <- function(lower, upper) {
+  v <- rep(0, upper)
+  v[lower:upper] <- 1 / (upper - lower + 1)
+  v
+}
+
+jags.data <- list(
+  y = data_hpai$ypool, nyears = ncol(data_hpai$ypool), nind = nrow(data_hpai$ypool),
+  f = data_hpai$funic, age = data_hpai$agesurvpool, agerec = data_hpai$agerecpool,
+  agedet = data_hpai$agedetpool, nyscaled = as.numeric(scale(1:ncol(data_hpai$ypool))),
+  FR = data_hpai$shortvec, fr = data_hpai$shortvec, nstates = 6,
+  J = data_hpai$prod$nfled, B = data_hpai$prod$nmonitored,
+  counts = data_hpai$cens[18:32],
+  pNinit1 = dUnif(1, 70), pNinit2 = dUnif(1, 30), pNinit3 = dUnif(1, 10),
+  pNinit4 = dUnif(1, 3), pNinit5 = dUnif(1, 100),
+  yearspd = nrow(data_hpai$prod), yearsproj = 10
+)
+```
+
+```{r write-jags-model}
+#| code-fold: true
+#| code-summary: "Show the full JAGS model (all three submodels combined)"
+cat(file = "pva2.jags", "
+
+    model{
+
+    ###########################
+    ###Productivity submodel###
+    ###########################
+
+  for(t in 1:yearspd){
+    J[t] ~ dpois(B[t]*rho[t])
+    log.rho[t] ~ dnorm(l.mean.rho, tau.rho)
+    rho[t] <- exp(log.rho[t])
+  }
+
+  for(t in (yearspd+1):(yearspd+yearsproj)){
+    log.rho[t] ~ dnorm(l.mean.rho, tau.rho)
+    rho[t] <- exp(log.rho[t])
+  }
+
+  mean.rho ~ dunif(0,5)
+  l.mean.rho <- log(mean.rho)
+  sigma.rho ~ dunif(0,5)
+  tau.rho <- pow(sigma.rho, -2)
+
+  ##################################
+  ###Population dynamics submodel###
+  ##################################
+
+  N[1,1] ~ dcat(pNinit1)
+  N[2,1] ~ dcat(pNinit2)
+  N[3,1] ~ dcat(pNinit3)
+  N[4,1] ~ dcat(pNinit4)
+  N[5,1] ~ dcat(pNinit3)
+  N[6,1] ~ dcat(pNinit4)
+  N[7,1] ~ dcat(pNinit4)
+  N[8,1] ~ dcat(pNinit5)
+  N[9,1] ~ dpois(omega[1])
+
+  for(t in 1:(yearspd-1+yearsproj)){
+    N[1,t+1] ~ dpois(rho[t] / 2 * s[1,t+17] * NB[t])
+    N[2,t+1] ~ dbin(s[2,t+17]*gam[2], N[1,t])
+    N[3,t+1] ~ dbin(s[2,t+17]*(1-gam[2]), N[1,t])
+    N[4,t+1] ~ dbin(s[3,t+17]*gam[3], N[3,t])
+    N[5,t+1] ~ dbin(s[3,t+17]*(1-gam[3]), N[3,t])
+    N[6,t+1] ~ dbin(s[3,t+17]*gam[3], N[5,t])
+    N[7,t+1] ~ dbin(s[3,t+17]*(1-gam[3]), N[5,t])
+    N[8,t+1] ~ dbin(s[3,t+17], N[2,t]+N[4,t]+N[6,t]+N[7,t]+N[8,t]+N[9,t])
+    N[9,t+1] ~ dpois(omega[t+1])
+
+    lambda[t] <- Ntot[t+1]/(Ntot[t]+0.001)
+    lambdaNB[t] <- NB[t+1]/NB[t]
+  }
+
+  for(t in 1:(yearspd+yearsproj)){
+    NB[t] <- N[2,t]+N[4,t]+N[6,t]+N[8,t]+N[9,t]
+    Nfloat[t] <- N[3,t]+N[5,t]+N[7,t]
+    Nlr[t] <- N[2,t]+N[4,t]+N[6,t]
+    Ntot[t] <- sum(N[,t])
+    propNB[t] <- NB[t]/Ntot[t]
+    propfloat[t] <- Nfloat[t]/Ntot[t]
+    propjuv[t] <- N[1,t]/Ntot[t]
+    Nfledglings[t] ~ dpois(rho[t] / 2 * NB[t])
+  }
+
+  for(t in 1:yearspd){
+    counts[t] ~ dpois(NB[t])
+  }
+
+  mean.omega ~ dunif(0.001, 30)
+  log.mean.omega <- log(mean.omega)
+  sigma.omega ~ dunif(0.001,5)
+  tau.omega <- pow(sigma.omega, -2)
+
+  for(t in 1:(yearspd+yearsproj)){
+    log.omega[t] ~ dnorm(log.mean.omega, tau.omega)T(0, 4.6)
+    omega[t] <- exp(log.omega[t])
+  }
+
+    #############################
+    ###Mark-recapture submodel###
+    #############################
+
+  for(a in 1:3){
+    mu.s[a] ~ dnorm(0, 0.001)
+    mean.s[a] <- ilogit(mu.s[a])
+    sigma.s[a] ~ dunif(0.001, 10)
+    tau.s[a] <- pow(sigma.s[a],-2)
+
+    mu.p[a] ~ dnorm(0, 0.001)
+    sigma.p[a] ~ dunif(0.001, 10)
+    mean.p[a] <- ilogit(mu.p[a])
+    tau.p[a] <- pow(sigma.p[a],-2)
+
+        for(t in 1:(nyears-1)){
+      logit.p[a,t] ~ dnorm(mu.p[a], tau.p[a])
+      p[a,t] <- ilogit(logit.p[a,t])
+        }
+  }
+
+    for(a in 1:3){
+      for(t in 1:(nyears-1+yearsproj)){
+      logit.s[a,t] ~ dnorm(mu.s[a], tau.s[a])
+      s[a,t] <- ilogit(logit.s[a,t])
+      }
+    }
+
+  gam[1] <- 0
+  gam[2] ~ dbeta(1,1)
+  gam[3] ~ dbeta(1,1)
+  gam[4] <- 1
+
+  for(t in 1:(nyears-1)){
+    logit.r[t] <- alpha.r + beta.r * nyscaled[t]
+    r[t] <- ilogit(logit.r[t])
+  }
+
+  alpha.r ~ dnorm(0, 0.001)
+  beta.r ~ dnorm(0, 0.001)
+
+  for(i in 1:nind){
+    for (t in f[i]:(nyears-1)){
+      psi[1,1,i,t] <- s[age[i,t],t]*(1-gam[agerec[i,t]])
+      psi[1,2,i,t] <- 0
+      psi[1,3,i,t] <- s[age[i,t],t]*gam[agerec[i,t]]
+      psi[1,4,i,t] <- 0
+      psi[1,5,i,t] <- 1-s[age[i,t],t]
+      psi[1,6,i,t] <- 0
+
+      psi[2,1,i,t] <- 0
+      psi[2,2,i,t] <- s[age[i,t],t]*(1-gam[agerec[i,t]])
+      psi[2,3,i,t] <- 0
+      psi[2,4,i,t] <- s[age[i,t],t]*gam[agerec[i,t]]
+      psi[2,5,i,t] <- 1-s[age[i,t],t]
+      psi[2,6,i,t] <- 0
+
+      psi[3,1,i,t] <- 0
+      psi[3,2,i,t] <- 0
+      psi[3,3,i,t] <- s[age[i,t],t]
+      psi[3,4,i,t] <- 0
+      psi[3,5,i,t] <- 1-s[age[i,t],t]
+      psi[3,6,i,t] <- 0
+
+      psi[4,1,i,t] <- 0
+      psi[4,2,i,t] <- 0
+      psi[4,3,i,t] <- 0
+      psi[4,4,i,t] <- s[age[i,t],t]
+      psi[4,5,i,t] <- 1-s[age[i,t],t]
+      psi[4,6,i,t] <- 0
+
+      psi[5,1,i,t] <- 0
+      psi[5,2,i,t] <- 0
+      psi[5,3,i,t] <- 0
+      psi[5,4,i,t] <- 0
+      psi[5,5,i,t] <- 0
+      psi[5,6,i,t] <- 1
+
+      psi[6,1,i,t] <- 0
+      psi[6,2,i,t] <- 0
+      psi[6,3,i,t] <- 0
+      psi[6,4,i,t] <- 0
+      psi[6,5,i,t] <- 0
+      psi[6,6,i,t] <- 1
+
+      po[1,1,i,t] <- p[agedet[i,t], t]
+      po[1,2,i,t] <- 0
+      po[1,3,i,t] <- 0
+      po[1,4,i,t] <- 0
+      po[1,5,i,t] <- 0
+      po[1,6,i,t] <- 1-p[agedet[i,t], t]
+
+      po[2,1,i,t] <- 0
+      po[2,2,i,t] <- 0
+      po[2,3,i,t] <- 0
+      po[2,4,i,t] <- 0
+      po[2,5,i,t] <- 0
+      po[2,6,i,t] <- 1
+
+      po[3,1,i,t] <- 0
+      po[3,2,i,t] <- 0
+      po[3,3,i,t] <- p[agedet[i,t], t]
+      po[3,4,i,t] <- 0
+      po[3,5,i,t] <- 0
+      po[3,6,i,t] <- 1-p[agedet[i,t], t]
+
+      po[4,1,i,t] <- 0
+      po[4,2,i,t] <- 0
+      po[4,3,i,t] <- 0
+      po[4,4,i,t] <- 0
+      po[4,5,i,t] <- 0
+      po[4,6,i,t] <- 1
+
+      po[5,1,i,t] <- 0
+      po[5,2,i,t] <- 0
+      po[5,3,i,t] <- 0
+      po[5,4,i,t] <- 0
+      po[5,5,i,t] <- r[t]
+      po[5,6,i,t] <- 1-r[t]
+
+      po[6,1,i,t] <- 0
+      po[6,2,i,t] <- 0
+      po[6,3,i,t] <- 0
+      po[6,4,i,t] <- 0
+      po[6,5,i,t] <- 0
+      po[6,6,i,t] <- 1
+    }
+  }
+
+  # Likelihood (Marginalized, Yackulic et al., 2020)
+
+for (i in 1:nind){
+
+  zeta[i,f[i],1] <- equals(1,y[i,f[i]])
+  zeta[i,f[i],2] <- equals(2,y[i,f[i]])
+  zeta[i,f[i],3] <- equals(3,y[i,f[i]])
+  zeta[i,f[i],4] <- equals(4,y[i,f[i]])
+  zeta[i,f[i],5] <- 0
+  zeta[i,f[i],6] <- 0
+
+  for (t in f[i]:(nyears-1)){
+    zeta[i,t+1,1] <- (zeta[i,t,1:6] %*% psi[,1,i,t]) * po[1,y[i,t+1],i,t]
+    zeta[i,t+1,2] <- (zeta[i,t,1:6] %*% psi[,2,i,t]) * po[2,y[i,t+1],i,t]
+    zeta[i,t+1,3] <- (zeta[i,t,1:6] %*% psi[,3,i,t]) * po[3,y[i,t+1],i,t]
+    zeta[i,t+1,4] <- (zeta[i,t,1:6] %*% psi[,4,i,t]) * po[4,y[i,t+1],i,t]
+    zeta[i,t+1,5] <- (zeta[i,t,1:6] %*% psi[,5,i,t]) * po[5,y[i,t+1],i,t]
+    zeta[i,t+1,6] <- (zeta[i,t,1:6] %*% psi[,6,i,t]) * po[6,y[i,t+1],i,t]
+  } #t
+
+  lik[i] <- sum(zeta[i,nyears,])
+  fr[i] ~ dbin(lik[i], FR[i])
+}
+
+    #Posterior predictive checks for the count and the productivity model
+
+     for(t in 1:yearspd){
+
+    predcounts[t] ~ dpois(NB[t])
+    checkcounts[t,1] <- abs((predcounts[t] - NB[t])/(NB[t]+0.0001))
+    checkcounts[t,2] <- abs((counts[t] - NB[t])/(NB[t]+0.0001))
+
+    predfledg[t] ~ dpois(B[t]*rho[t])
+    checkfledg[t,1] <- pow(predfledg[t] - B[t]*rho[t], 2)/(B[t]*rho[t])
+    checkfledg[t,2] <- pow(J[t] - B[t]*rho[t],2)/(B[t]*rho[t])
+
+    }
+
+    chi2[1,1] <- sum(checkcounts[,1])
+    chi2[1,2] <- sum(checkcounts[,2])
+    chi2[2,1] <- sum(checkfledg[,1])
+    chi2[2,2] <- sum(checkfledg[,2])
+
+    }
+    ")
+```
+
+## Fitting the model
+
+The published analysis ran 4 chains of 80,000 iterations each (40,000 discarded as burn-in) — several hours of compute. For this document, we run a much shorter chain live, purely so you can see the fitting process actually happen. The **Results** section below uses whichever of these it can find, in order of preference:
+
+1.  The actual published posterior (`pva_hpai.RData` / `pva_nohpai.RData`), if you fetched them in the download step above — these are the real results, not a re-run.
+2.  Your own full local run (`pva_hpai_full.rds` / `pva_nohpai_full.rds`), if you ran the companion `run_full_model.R` / `run_nohpai_model.R` scripts yourself.
+3.  Otherwise, the short demo run below, clearly labeled as such.
+
+```{r inits-params}
+nyears <- ncol(data_hpai$ypool)
+yearspd <- 15
+yearsproj <- 10
+
+inits <- function(){list(
+  sigma.s = rep(.5,3),
+  logit.s = matrix(nrow = 3, ncol = nyears-1+yearsproj, 0),
+  mu.s = c(-1,0.2,1),
+  mu.p = c(-1,0,1),
+  sigma.p = rep(.5,3),
+  logit.p = matrix(nrow = 3, ncol = nyears-1, -1),
+  alpha.r = -1,
+  beta.r = .5,
+  gam = c(NA, rep(.5,2), NA),
+  mean.rho = 2,
+  sigma.rho = 1,
+  log.rho = rep(1, yearspd+yearsproj)
+)}
+
+parameters <- c("s", "mean.s", "sigma.s", "p", "sigma.p", "mean.p", "r",
+                 "alpha.r", "beta.r", "rho", "mean.rho", "sigma.rho",
+                 "mean.omega", "sigma.omega", "NB", "Nfloat", "Nlr", "N",
+                 "gam", "chi2", "lambda", "lambdaNB", "propNB", "propfloat",
+                 "propjuv", "Ntot", "Nfledglings")
+```
+
+```{r run-demo, cache=TRUE}
+# A short, illustrative run only -- NOT the published estimates.
+out_demo <- jags(jags.data, inits, parameters, "pva2.jags",
+                  n.chains = 2, n.thin = 1, n.iter = 600, n.burnin = 300,
+                  parallel = FALSE, verbose = FALSE)
+```
+
+```{r load-full-if-available}
+# Try the real published posterior first, then a local full run, then fall
+# back to the demo run above.
+load_full_result <- function(rdata_path, rds_path) {
+  if (file.exists(rdata_path)) {
+    e <- new.env()
+    load(rdata_path, envir = e)
+    return(e$out)
+  } else if (file.exists(rds_path)) {
+    return(readRDS(rds_path))
+  }
+  NULL
+}
+
+model1 <- load_full_result("pva_hpai.RData", "pva_hpai_full.rds")
+model2 <- load_full_result("pva_nohpai.RData", "pva_nohpai_full.rds")
+
+full_available    <- !is.null(model1)
+nohpai_available  <- !is.null(model2)
+demo_only         <- !full_available
+
+out <- if (full_available) model1 else out_demo
+```
+
+`r if (full_available) "**Using the full published posterior below.**" else "**No full posterior found yet -- the plots below use the short demo run and will look rougher than the published figures. Fetch pva_hpai.RData in the download step above, or drop in pva_hpai_full.rds, and re-render to upgrade automatically.**"`
+
+### Did it converge?
+
+```{r rhat-check}
+rhat_vals <- out_demo$summary[, "Rhat"]
+cat("Max Rhat across all monitored parameters (demo run):", round(max(rhat_vals, na.rm = TRUE), 3), "\n")
+cat("Parameters with Rhat > 1.1:", sum(rhat_vals > 1.1, na.rm = TRUE),
+    "out of", length(rhat_vals), "\n")
+```
+
+With only a few hundred iterations, don't expect clean convergence from the demo run -- Rhat values well above 1.01 are completely normal here. The published analysis used 80,000 iterations per chain specifically to get these below 1.02 everywhere.
+
+### Posterior predictive checks
+
+The model includes built-in posterior predictive checks for the count and productivity sub-models — comparing how far *simulated* data falls from the model against how far the *real* data falls. If the model fits well, these should be roughly balanced (a Bayesian p-value near 0.5, not close to 0 or 1).
+
+```{r ppc}
+chi2 <- out$sims.list$chi2
+bpv_counts <- mean(chi2[,1,1] > chi2[,1,2])
+bpv_prod   <- mean(chi2[,2,1] > chi2[,2,2])
+cat("Bayesian p-value, count model:      ", round(bpv_counts, 2), "\n")
+cat("Bayesian p-value, productivity model:", round(bpv_prod, 2), "\n")
+```
+
+The published values were 0.59 (count model) and 0.39 (productivity model) — both comfortably in the "adequate fit" range.
+
+## Results
+
+With the model fit (or loaded), here's what it actually shows -- starting with the demographic rates, then the population trajectory they add up to.
+
+### Survival and productivity over time
+
+```{r plot-survival-full}
+#| eval: !expr full_available
+#| fig-cap: "Age-specific survival and productivity, matching the published figure."
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+s1res <- data.frame(mean = model1$mean$s[1,1:31], cim = model1$q2.5$s[1,1:31], cip = model1$q97.5$s[1,1:31])
+s2res <- data.frame(mean = model1$mean$s[2,1:31], cim = model1$q2.5$s[2,1:31], cip = model1$q97.5$s[2,1:31])
+s3res <- data.frame(mean = model1$mean$s[3,1:31], cim = model1$q2.5$s[3,1:31], cip = model1$q97.5$s[3,1:31])
+s1res$type <- "Juvenile"; s2res$type <- "Immature"; s3res$type <- "Adult"
+
+sdf <- as.data.frame(rbind(s1res, s2res, s3res))
+sdf$type <- factor(sdf$type, levels = c("Juvenile", "Immature", "Adult"))
+sdf$year <- rep(1994:2024, 3)
+names(sdf) <- c("mean", "cim", "cip", "type", "year")
+
+rhodf <- data.frame(mean = model1$mean$rho[1:15], cim = model1$q2.5$rho[1:15],
+                     cip = model1$q97.5$rho[1:15], year = 2010:2024)
+
+s1df <- sdf %>% filter(type == "Juvenile")
+ggs1 <- ggplot(s1df, aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_point(size = 2) +
+  geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
+  theme_classic() + ylab(expression(Juvenile~survival~(S[1]))) + xlab("") + ylim(c(0.15,1)) +
+  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+
+s2df <- sdf %>% filter(type == "Immature")
+ggs2 <- ggplot(s2df, aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_point(size = 2) +
+  geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
+  theme_classic() + ylab(expression(Subadult~survival~(S[2]))) + xlab("") + ylim(c(0.15,1)) +
+  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+
+s3df <- sdf %>% filter(type == "Adult")
+ggs3 <- ggplot(s3df, aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_point(size = 2) +
+  geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
+  theme_classic() + ylab(expression(Adult~survival~(S[3]))) + xlab("") + ylim(c(0.15,1)) +
+  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+
+rho2df <- rbind(data.frame(mean = rep(NA,16), cim = rep(NA,16), cip = rep(NA,16), year = 1994:2009), rhodf)
+rho2gg <- ggplot(rho2df, aes(x = year, y = mean, group = 1)) +
+  geom_line(linewidth = .7, col = "black") + geom_point(size = 2, col = "black") +
+  geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", linewidth = .6, width = .2, alpha = .35) +
+  theme_classic() + ylim(1.4,2.7) + ylab(expression(Productivity~(rho))) + xlab("") +
+  geom_rect(aes(xmin = 2019.55, ymin = 1.4, xmax = 2023.5, ymax = 2.7), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+
+grid.arrange(ggs1, ggs2, ggs3, rho2gg, layout_matrix = matrix(data = c(1,2,3,4), nrow = 2, byrow = TRUE))
+```
+
+```{r plot-survival-demo}
+#| eval: !expr demo_only
+library(ggplot2)
+
+years <- 1993:2024
+s_mean <- out_demo$mean$s
+s_lo   <- out_demo$q2.5$s
+s_hi   <- out_demo$q97.5$s
+
+surv_df <- data.frame(
+  year = rep(years[-length(years)], times = 3),
+  age_class = rep(c("Juvenile (S1)", "Subadult (S2)", "Adult (S3)"), each = length(years) - 1),
+  mean = c(s_mean[1, 1:(length(years)-1)], s_mean[2, 1:(length(years)-1)], s_mean[3, 1:(length(years)-1)]),
+  lo   = c(s_lo[1, 1:(length(years)-1)],   s_lo[2, 1:(length(years)-1)],   s_lo[3, 1:(length(years)-1)]),
+  hi   = c(s_hi[1, 1:(length(years)-1)],   s_hi[2, 1:(length(years)-1)],   s_hi[3, 1:(length(years)-1)])
+)
+
+ggplot(surv_df, aes(x = year, y = mean)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "#2F9E93", alpha = 0.2) +
+  geom_line(color = "#2F9E93", linewidth = 0.8) +
+  geom_rect(aes(xmin = 2021, xmax = 2024, ymin = -Inf, ymax = Inf),
+            fill = "#E2A63C", alpha = 0.08, inherit.aes = FALSE) +
+  facet_wrap(~age_class, ncol = 1) +
+  labs(x = NULL, y = "Survival probability",
+       title = "Age-specific survival, 1993-2024 (demo run -- rough)",
+       subtitle = "Shaded band = HPAIV panzootic years (2021-2024)") +
+  theme_minimal(base_size = 12)
+```
+
+### Key population stages, 2010-2024
+
+Zooming out from individual survival rates to the population itself: how the breeding pairs, floaters, juveniles, and immigrants moved over the same period.
+
+```{r plot-population-full}
+#| eval: !expr full_available
+censdf <- data.frame(
+  mean = as.numeric(t(model1$q50$N)), cim = as.numeric(t(model1$q2.5$N)), cip = as.numeric(t(model1$q97.5$N)),
+  year = factor(rep(2010:2034, 9)),
+  stage = factor(rep(c("1-Juvenile", "2-B 2yo.", "3-NB 2yo.", "4-B 3yo.", "5-NB 3yo.", "6-B 4yo.",
+                       "7-NB 4yo.", "8-Long-time breeders", "9-Immigrants"), each = 25))
+)
+
+bdf <- data.frame(mean = model1$q50$NB, cim = model1$q2.5$NB, cip = model1$q97.5$NB, type = "Breeders", year = 2010:2034)
+immdf <- data.frame(mean = model1$q50$N[9,], cim = model1$q2.5$N[9,], cip = model1$q97.5$N[9,], type = "Immigrant recruits", year = 2010:2034)
+floatdf <- data.frame(mean = model1$q50$Nfloat, cim = model1$q2.5$Nfloat, cip = model1$q97.5$Nfloat, type = "Floaters", year = 2010:2034)
+
+juvdf <- censdf %>% filter(stage == "1-Juvenile") %>% select("mean", "cim", "cip", "stage", "year")
+juvdf$stage <- "Juveniles"; names(juvdf)[4] <- "type"; juvdf$year <- 2010:2034
+
+ggb <- ggplot(bdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
+  theme_classic() + ylab(expression(N~Breeding~Pairs~(N[b]))) + xlab("") +
+  geom_rect(aes(xmin = 2019.55, ymin = 70, xmax = 2023.5, ymax = 250), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2)) +
+  theme(axis.text.x = element_blank(), axis.ticks.length.x = unit(.2, "cm"))
+
+ggf <- ggplot(floatdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
+  theme_classic() + ylab(expression(N~Floaters~(N[float]))) + xlab("") +
+  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 45), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2)) +
+  theme(axis.text.x = element_blank(), axis.ticks.length.x = unit(.2, "cm"))
+
+ggj <- ggplot(juvdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
+  theme_classic() + ylab(expression(N~Juveniles~(N[juv]))) + xlab("") +
+  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 115), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2))
+
+ggi <- ggplot(immdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
+  theme_classic() + ylab(expression(N~Immigrants~(N[imm]))) + xlab("") +
+  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 80), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2))
+
+grid.arrange(ggb, ggf, ggj, ggi, layout_matrix = matrix(data = c(1,2,3,4), nrow = 2, byrow = TRUE))
+```
+
+```{r plot-population-demo}
+#| eval: !expr demo_only
+nb_mean <- out_demo$mean$NB
+nb_lo <- out_demo$q2.5$NB
+nb_hi <- out_demo$q97.5$NB
+pop_years <- 2010:(2010 + length(nb_mean) - 1)
+
+pop_df <- data.frame(year = pop_years, mean = nb_mean, lo = nb_lo, hi = nb_hi)
+
+ggplot(pop_df, aes(x = year, y = mean)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), fill = "#E2A63C", alpha = 0.25) +
+  geom_line(color = "#10241F", linewidth = 0.9) +
+  geom_vline(xintercept = 2021, linetype = "dashed", color = "#E2A63C") +
+  labs(x = NULL, y = "Number of breeding pairs",
+       title = "Estimated breeding population (demo run -- rough), with 10-year projection",
+       subtitle = "Dashed line marks the onset of the HPAIV panzootic") +
+  theme_minimal(base_size = 12)
+```
+
+`r if (!full_available) "Both plots above are placeholders from the short demo run. Fetch the published posterior (see the download step) or run the full model yourself to see the actual publication figures." else ""`
+
+### Resilience: what if HPAIV hadn't happened?
+
+"Resilience" gets used loosely a lot these days -- in ecology, in policy, in everyday conversation about, well, almost anything. In population ecology it has a fairly precise meaning, and it's worth spelling out before looking at the plot, because the plot only makes sense once you know what it's measuring.
+
+A population's resilience to a disturbance -- an outbreak, a storm, a bad breeding season -- is usually broken into a few distinct pieces:
+
+- **Duration of the perturbation (T)** -- how long the disturbance itself actively suppresses demographic rates. Not how long the population takes to recover, just how long the *disease* (or storm, or whatever it is) keeps directly hurting survival or reproduction.
+- **Recovery time (R)** -- once the disturbance ends, how many years until the population gets back to where it was before. This is the number people usually mean when they say "resilient" -- bounces back fast, is resilient; takes decades, isn't.
+- **Inertia (I)** -- the part that's easy to miss: even after a population has "recovered" in the sense of returning to positive growth, it can permanently settle at a *smaller* size than it would have reached without the disturbance ever happening. That gap -- what could have been, versus what actually happens long-term -- is inertia, and it's often the more consequential number for conservation, because it doesn't go away once the crisis is over.
+
+You can't get any of these three from the HPAIV-affected population alone -- "recovering to what?" only has an answer if you also know what the population's trajectory *would have* looked like without the outbreak. That's exactly what the second model (fit only to pre-2021 data, then projected forward as if HPAIV had never arrived) gives us: a counterfactual baseline to measure the real trajectory against.
+
+Conveniently, that second model's results are already sitting in the same Zenodo archive as everything else here -- no separate run needed, just load it alongside the first:
+
+```{r plot-resilience}
+#| eval: !expr full_available && nohpai_available
+pd <- position_dodge(width = .6)
+
+bdf1 <- data.frame(mean = model1$q50$NB, cim = model1$q2.5$NB, cip = model1$q97.5$NB, type = "Breeders", year = 2010:2034)
+bdf2 <- data.frame(mean = model2$q50$NB, cim = model2$q2.5$NB, cip = model2$q97.5$NB, type = "Breeders", year = 2010:2034)
+bdf1$year <- factor(bdf1$year); bdf2$year <- factor(bdf2$year)
+
+ggresi <- ggplot(bdf1, aes(x = year, y = mean, group = 1)) +
+  geom_line(linewidth = .8, position = pd, aes(col = "HPAI")) + theme_classic() +
+  ylab("N breeding pairs") + xlab("") +
+  scale_x_discrete(breaks = seq(from = 2010, to = 2034, by = 4)) +
+  guides(col = guide_legend(title = ""))
+
+ggresi2 <- ggresi + geom_line(data = bdf2, aes(x = year, y = mean, col = "No HPAI"), linetype = "dashed", linewidth = .8) +
+  theme(plot.margin = unit(c(0.3, 1.6, 0.3, 0.3), "cm"))
+
+ggresi6 <- ggresi2 + scale_color_manual(name = "", values = c("HPAI" = "blue", "No HPAI" = "black")) +
+  theme(legend.position = c(0.85,0.2), legend.text = element_text(size = 11.5)) +
+  guides(color = guide_legend(override.aes = list(linewidth = 8.5)))
+
+ggresi6
+```
+
+`r if (!(full_available && nohpai_available)) "This needs the No-HPAI results too (pva_nohpai.RData) -- fetch it in the download step above alongside pva_hpai.RData to see it here." else ""`
+
+The gap between the two lines *is* resilience, made visible: how long they diverge (T), whether the solid line bends back toward the dashed one and how long that takes (R), and whether -- even after it stops falling further behind -- it still settles onto a lower trajectory than the dashed line for good (I). All three numbers in the published analysis came directly from a plot that looks like this one.
+
+### Supplementary diagnostics
+
+A few secondary parameters that aren't the main story, but round out the picture -- recruitment (how likely a nonbreeder is to acquire a territory), resighting probability (how likely we are to detect a bird that's alive), and recovery probability (how likely we are to find one that's died).
+
+```{r plot-supp}
+#| eval: !expr full_available
+#| fig-cap: "Recruitment probability, resighting probability, and recovery probability posteriors."
+
+# Recruitment
+r2 <- model1$sims.list$gam[,2]
+r34 <- model1$sims.list$gam[,3]
+gamdf <- data.frame(post = c(r2, r34), type = c(rep("A2", length(r2)), rep("A3&A4", length(r2))))
+gamgg <- ggplot(gamdf, aes(x = post, fill = type)) + geom_density(alpha = 0.4) + theme_classic() +
+  xlab("Recruitment probability") + ylab("Density") + xlim(c(0,1)) + guides(fill = guide_legend("Age Class"))
+gamgg
+
+# Resighting
+p1res <- data.frame(mean = model1$mean$p[1,1:31], cim = model1$q2.5$p[1,1:31], cip = model1$q97.5$p[1,1:31])
+p2res <- data.frame(mean = model1$mean$p[2,1:31], cim = model1$q2.5$p[2,1:31], cip = model1$q97.5$p[2,1:31])
+p3res <- data.frame(mean = model1$mean$p[3,1:31], cim = model1$q2.5$p[3,1:31], cip = model1$q97.5$p[3,1:31])
+p1res$type <- "A1"; p2res$type <- "A2&A3&A4"; p3res$type <- "A5"
+pdf2 <- as.data.frame(rbind(p1res, p2res, p3res))
+pdf2$type <- factor(pdf2$type, levels = c("A1", "A2&A3&A4", "A5"))
+pdf2$year <- rep(1994:2024, 3)
+detgg <- ggplot(pdf2, aes(x = year, y = mean, group = type, col = type)) +
+  geom_ribbon(aes(ymin = cim, ymax = cip, fill = type), linewidth = .6, alpha = .2, position = pd, col = NA) +
+  geom_line(linewidth = .9, position = pd) + geom_point(size = 1.3, position = pd) +
+  facet_wrap(~type, nrow = 2) + theme_classic() + ylab("") + xlab("") +
+  scale_color_manual(values = c("darkgreen", "orange", "purple")) +
+  scale_fill_manual(values = c("darkgreen", "orange", "purple")) + theme(legend.position = "none")
+detgg
+
+# Recovery
+recs <- data.frame(mean = model1$mean$r, cim = model1$q2.5$r, cip = model1$q97.5$r, year = 1994:2024)
+recgg <- ggplot(recs, aes(x = year, y = mean)) +
+  geom_ribbon(aes(ymin = cim, ymax = cip), fill = "gray", linewidth = .6, alpha = .4) +
+  geom_line(linewidth = .9, col = "black") + theme_classic() + ylab("") + xlab("")
+recgg
+```
+
+`r if (!full_available) "Supplementary diagnostics need the full posterior -- not shown for the demo run." else ""`
+
+## What it means
+
+The published, full-posterior analysis (using all 80,000 iterations) found:
+
+- Adult survival dropped sharply in 2021-2022, coinciding with a \~25% crash in breeding pairs over just two years -- an unusually large decline in adult survival for a long-lived species, where natural selection typically favors it staying stable even through disturbance.
+- Projecting forward, the breeding population is expected to take **about a decade** to recover to its pre-panzootic size, and may ultimately stabilize **\~21% below** its former level if outbreaks continue at anything like their recent frequency.
+
+That second point is really the conservation payoff of doing this as an IPM rather than just watching the counts: knowing survival dropped tells you *why* the crash happened, but projecting the model forward is what tells you whether -- and how -- the population can plausibly bounce back, and gives you a quantitative basis for that "urgent conservation response" language that's easy to say and hard to actually back up with numbers.
+
+If you want to go further, the paper's full resilience analysis (recovery time and population inertia) compares this HPAIV-inclusive model against a second one fit only to pre-outbreak data (`Code_NoHPAI.R`) -- see the "Resilience" section above, which builds that comparison directly once both scenarios are available.
+
+## Citation
+
+If this analysis or code is useful to you, please cite:
+
+> Badia-Boher, J.A., Schaub, M., Mollet, M., van Geneijgen, P., van der Jeugd, H.P., Caliendo, V., & Kéry, M. (2026). Evaluating the demographic impacts of the highly pathogenic avian influenza panzootic. *Journal of Applied Ecology*, 63, e70234. [doi.org/10.1111/1365-2664.70234](https://doi.org/10.1111/1365-2664.70234)
+
+Data and code: [doi.org/10.5281/zenodo.17571734](https://doi.org/10.5281/zenodo.17571734) (CC-BY 4.0)

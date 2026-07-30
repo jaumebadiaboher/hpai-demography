@@ -20,7 +20,7 @@ authors:
   - family-names: Kéry
     given-names: Marc
 license: CC-BY-4.0
-repository-code: "https://github.com/jaumebadiaboher/hpai-demographic-impact"
+repository-code: "https://github.com/jaumebadiaboher/hpai-demography"
 identifiers:
   - type: doi
     value: 10.5281/zenodo.17571734

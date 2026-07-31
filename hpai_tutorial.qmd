@@ -602,6 +602,7 @@ With the model fit (or loaded), here's what it actually shows -- starting with t
 ```{r plot-survival-full}
 #| eval: !expr full_available
 #| fig-cap: "Age-specific survival and productivity, matching the published figure."
+#| fig-height: 9
 library(ggplot2)
 library(dplyr)
 library(gridExtra)
@@ -619,33 +620,40 @@ names(sdf) <- c("mean", "cim", "cip", "type", "year")
 rhodf <- data.frame(mean = model1$mean$rho[1:15], cim = model1$q2.5$rho[1:15],
                      cip = model1$q97.5$rho[1:15], year = 2010:2024)
 
+# A soft background band marking the outbreak years (2021-2024), instead of a
+# drawn-on-top dashed box -- reads as a highlighted period rather than a
+# rectangle sitting on the data. -Inf/Inf on y means it always fills the full
+# plot height regardless of each subplot's own y-range.
+outbreak_band <- annotate("rect", xmin = 2020.55, xmax = 2024.5, ymin = -Inf, ymax = Inf,
+                           fill = "#E2A63C", alpha = 0.15)
+
 s1df <- sdf %>% filter(type == "Juvenile")
 ggs1 <- ggplot(s1df, aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_point(size = 2) +
   geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
-  theme_classic() + ylab(expression(Juvenile~survival~(S[1]))) + xlab("") + ylim(c(0.15,1)) +
-  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+  theme_classic(base_size = 12) + ylab(expression(Juvenile~survival~(S[1]))) + xlab("") + ylim(c(0.15,1))
 
 s2df <- sdf %>% filter(type == "Immature")
 ggs2 <- ggplot(s2df, aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_point(size = 2) +
   geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
-  theme_classic() + ylab(expression(Subadult~survival~(S[2]))) + xlab("") + ylim(c(0.15,1)) +
-  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+  theme_classic(base_size = 12) + ylab(expression(Subadult~survival~(S[2]))) + xlab("") + ylim(c(0.15,1))
 
 s3df <- sdf %>% filter(type == "Adult")
 ggs3 <- ggplot(s3df, aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_point(size = 2) +
   geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", width = .2, alpha = .35, linewidth = .6) +
-  theme_classic() + ylab(expression(Adult~survival~(S[3]))) + xlab("") + ylim(c(0.15,1)) +
-  geom_rect(aes(xmin = 2019.55, ymin = .15, xmax = 2023.5, ymax = 1), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+  theme_classic(base_size = 12) + ylab(expression(Adult~survival~(S[3]))) + xlab("") + ylim(c(0.15,1))
 
 rho2df <- rbind(data.frame(mean = rep(NA,16), cim = rep(NA,16), cip = rep(NA,16), year = 1994:2009), rhodf)
 rho2gg <- ggplot(rho2df, aes(x = year, y = mean, group = 1)) +
+  outbreak_band +
   geom_line(linewidth = .7, col = "black") + geom_point(size = 2, col = "black") +
   geom_errorbar(aes(ymin = cim, ymax = cip), col = "black", linewidth = .6, width = .2, alpha = .35) +
-  theme_classic() + ylim(1.4,2.7) + ylab(expression(Productivity~(rho))) + xlab("") +
-  geom_rect(aes(xmin = 2019.55, ymin = 1.4, xmax = 2023.5, ymax = 2.7), color = "orange", fill = NA, linetype = "longdash", linewidth = .5)
+  theme_classic(base_size = 12) + ylim(1.4,2.7) + ylab(expression(Productivity~(rho))) + xlab("")
 
 grid.arrange(ggs1, ggs2, ggs3, rho2gg, layout_matrix = matrix(data = c(1,2,3,4), nrow = 2, byrow = TRUE))
 ```
@@ -685,6 +693,7 @@ Zooming out from individual survival rates to the population itself: how the bre
 
 ```{r plot-population-full}
 #| eval: !expr full_available
+#| fig-height: 9
 censdf <- data.frame(
   mean = as.numeric(t(model1$q50$N)), cim = as.numeric(t(model1$q2.5$N)), cip = as.numeric(t(model1$q97.5$N)),
   year = factor(rep(2010:2034, 9)),
@@ -699,30 +708,33 @@ floatdf <- data.frame(mean = model1$q50$Nfloat, cim = model1$q2.5$Nfloat, cip = 
 juvdf <- censdf %>% filter(stage == "1-Juvenile") %>% select("mean", "cim", "cip", "stage", "year")
 juvdf$stage <- "Juveniles"; names(juvdf)[4] <- "type"; juvdf$year <- 2010:2034
 
+outbreak_band <- annotate("rect", xmin = 2020.55, xmax = 2024.5, ymin = -Inf, ymax = Inf,
+                           fill = "#E2A63C", alpha = 0.15)
+
 ggb <- ggplot(bdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
-  theme_classic() + ylab(expression(N~Breeding~Pairs~(N[b]))) + xlab("") +
-  geom_rect(aes(xmin = 2019.55, ymin = 70, xmax = 2023.5, ymax = 250), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  theme_classic(base_size = 12) + ylab(expression(N~Breeding~Pairs~(N[b]))) + xlab("") +
   scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2)) +
   theme(axis.text.x = element_blank(), axis.ticks.length.x = unit(.2, "cm"))
 
 ggf <- ggplot(floatdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
-  theme_classic() + ylab(expression(N~Floaters~(N[float]))) + xlab("") +
-  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 45), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  theme_classic(base_size = 12) + ylab(expression(N~Floaters~(N[float]))) + xlab("") +
   scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2)) +
   theme(axis.text.x = element_blank(), axis.ticks.length.x = unit(.2, "cm"))
 
 ggj <- ggplot(juvdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
-  theme_classic() + ylab(expression(N~Juveniles~(N[juv]))) + xlab("") +
-  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 115), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  theme_classic(base_size = 12) + ylab(expression(N~Juveniles~(N[juv]))) + xlab("") +
   scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2))
 
 ggi <- ggplot(immdf[1:15,], aes(x = year, y = mean, group = 1), col = "black") +
+  outbreak_band +
   geom_line(linewidth = .7) + geom_ribbon(aes(ymin = cim, ymax = cip), col = NA, fill = "gray", alpha = .35) +
-  theme_classic() + ylab(expression(N~Immigrants~(N[imm]))) + xlab("") +
-  geom_rect(aes(xmin = 2019.55, ymin = 0, xmax = 2023.5, ymax = 80), color = "orange", fill = NA, linetype = "longdash", linewidth = .5) +
+  theme_classic(base_size = 12) + ylab(expression(N~Immigrants~(N[imm]))) + xlab("") +
   scale_x_continuous(breaks = seq(from = 2012, to = 2024, by = 4), expand = expansion(add = 1.2))
 
 grid.arrange(ggb, ggf, ggj, ggi, layout_matrix = matrix(data = c(1,2,3,4), nrow = 2, byrow = TRUE))

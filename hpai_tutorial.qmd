@@ -51,8 +51,9 @@ The archive contains two parallel datasets: one covering 1993–2024 (including 
 One thing to flag before going any further: **the three data streams don't share the same time span.** Mark-recapture-recovery (`ypool`) goes all the way back to 1993, but breeding pair counts (`cens`) and productivity surveys (`prod`) only start in 2010 -- monitoring effort for those two ramped up considerably later than the ringing scheme did. That's not a problem for the model (it's completely normal for IPMs to have data streams of different lengths -- each parameter just gets estimated from whichever years actually have data for it), but it does mean two different "year 1"s are floating around the code: 1993 for anything indexed off the CMR data, 2010 for anything indexed off the counts or productivity. Keep that in the back of your mind -- it's the reason for a slightly confusing index shift later on.
 
 ```{r download-data}
-#| eval: false
-# Fetch the data + code archive directly from Zenodo. If the data are already downloaded, no need to do this again (check).
+#| eval: true
+# Fetch the data + code archive directly from Zenodo. Only downloads what's
+# missing -- safe to re-run, and runs automatically on every render.
 if (!file.exists("data_hpai.RData")) {
   if (!requireNamespace("zen4R", quietly = TRUE)) install.packages("zen4R")
   library(zen4R)
@@ -63,19 +64,29 @@ if (!file.exists("data_hpai.RData")) {
   )
 }
 
-# Optional, but recommended: the archive also contains the actual published
-# posterior samples (pva_hpai.RData, pva_nohpai.RData) -- these ARE the
-# published results, not a re-run of them. Fetching them directly means the
-# Results section below can show publication-quality plots without you
-# needing to run any MCMC yourself. They're larger (~25 MB each), so this
-# is opt-in rather than automatic.
+# The archive also contains the actual published posterior samples
+# (pva_hpai.RData, pva_nohpai.RData) -- these ARE the published results, not
+# a re-run of them. Fetching them means the Results section below shows
+# publication-quality plots without you needing to run any MCMC yourself.
+# They're larger (~25 MB each) but only download once.
+# The archive also contains the actual published posterior samples
+# (pva_hpai.RData, pva_nohpai.RData) -- these ARE the published results, not
+# a re-run of them. Fetching them means the Results section below shows
+# publication-quality plots without you needing to run any MCMC yourself.
+# They're larger (~25 MB each) but only download once. Wrapped in tryCatch:
+# these are optional (the demo run below is a safe fallback), so a network
+# hiccup here shouldn't take down the rest of the document.
 if (!file.exists("pva_hpai.RData")) {
-  library(zen4R)
-  download_zenodo(
-    doi = "10.5281/zenodo.17571734",
-    path = ".",
-    files = list("pva_hpai.RData", "pva_nohpai.RData")
-  )
+  tryCatch({
+    library(zen4R)
+    download_zenodo(
+      doi = "10.5281/zenodo.17571734",
+      path = ".",
+      files = list("pva_hpai.RData", "pva_nohpai.RData")
+    )
+  }, error = function(e) {
+    message("Could not fetch the full posterior from Zenodo (", conditionMessage(e), ") -- falling back to the demo run below.")
+  })
 }
 ```
 
